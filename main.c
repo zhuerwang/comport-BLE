@@ -12,6 +12,18 @@
 
 #define DEVNAME "/dev/ttyUSB0"
 
+
+
+int             g_stop = 0;
+
+void sig_handler(int sig_t);
+void sig_handler(int sig_t)
+{
+    if(SIGKILL==sig_t)
+        p_stop=1;
+}
+
+
 int main(int argc, char *argv[])
 {
     int         rc = -1;
@@ -28,6 +40,7 @@ int main(int argc, char *argv[])
 	sqlite3 	*db;
 	char 		sql[256];
 
+    ble_ctx_t   ble;
     comport_info_t *ci;
 
     struct option opts[]=
@@ -56,145 +69,112 @@ int main(int argc, char *argv[])
         }
     }
 
+    signal(SIGKILL, sig_handler);
+
     ci = comport_init(DEVNAME , baudrate, setting);
+    ble.comport = ci;
 
-    ble_wake(ci);
-
-    if((rv = ble_enquire_name(ci, val_buf, sizeof(val_buf))) < 0)
+    if((rv = ble_init(&ble)) < 0)
     {
-        printf("BLE get device name failed.\n");
+        printf("ble device initialize failed.\n");
         goto error;
     }
-    printf("BLE name : %s\n",val_buf);
-    
+    printf("ble device initialize successful.\n");
 
-    if((rv = ble_enquire_addr(ci, val_buf, sizeof(val_buf))) < 0)
+    if((rv = database_init()) < 0)
     {
-        printf("BLE get device MAC address failed.\n");
-        goto error;
+        printf("database initialize failed.\n");
+        goto sqlite3_error;
     }
-    printf("BLE addr : %s\n",val_buf);
-
-    if((rv = ble_set_slave_role(ci)) < 0)
-    {
-        printf("Set ble as slave mode failed.\n");
-        goto error;
-    }
-    else
-    {
-        printf("BLE set slave mode successful.\n");
-    }
-
+    printf("database initialize successful.\n");
 
     printf("BLE is waiting for connecting........\n");
-    while(!(ci->conn_bit))
-    {    
-        if((rv = ble_check_conn(ci)) < 0)
+	while( !g_stop )
+	{
+        if( !ble.connected ) /* while ble lost connect and try connect each 1s */
         {
-            ble_sleep(ci);
+            if(ble_sleep(ble))
+            {
+                printf("Ble is sleep mode and wait for connecting......\n");
+            }
+
+            while((rv = ble_check_conn(ble))< 0)
+            {
+                sleep(1);
+                continue;
+            }
         }
-    }
+        else    /* while ble has been connecting and check if the ble lost connect */
+        {
+            
+        }
 
-	rv = sqlite3_open("ble.db", &db);
-	if( rv )
-	{	
-		fprintf(stderr, "Can't open database: %s\n", sqlite3_errmsg(db));
-        goto error;
-	}
-	else
-	{
-		fprintf(stdout, "Opened database successfully.\n");
-	}
-
-	char *sql_s =   "CREATE TABLE IF NOT EXISTS STUDENT(" \
-			 "NUMBER  INTEGER PRIMARY KEY     AUTOINCREMENT,"\
-			 "SN      CHAR(64)    NOT NULL,"\
-			 "TEMPER    CHAR(64)    NOT NULL,"\
-			 "HUMIDITY  CHAR(64)    NOT NULL,"
-             "TIME CHAR(64)   NOT NULL);";		   
-
-	rc = sqlite3_exec(db, sql_s, 0, 0, &zErrMsg);
-	if( rc != SQLITE_OK )
-	{
-		fprintf(stderr, "SQL error: %s\n", zErrMsg);
-		sqlite3_free(zErrMsg);
-		goto sqlite3_error;
-	}
-	else
-	{
-		fprintf(stdout, "Table create successfully\n");
-	}
-
-	printf("-------------gather temperature------------\n");
-	/* while datapack coming then gather temperature and humidity */
-	while(ci->conn_bit)
-	{
-
-		if((ret = ble_recv_data(ci, cjson_str, sizeof(cjson_str))) < 0)
+		if((ret = ble_recv_data(ble, cjson_str, sizeof(cjson_str))) < 0)
 		{
 			printf("Read json string failed.\n");
 
-            if((ret = ble_reply(ci)) < 0)
+            ble_check_lost(ble);
+            if((ret = ble_reply(ble)) < 0)
             {
                 printf("Reply master failed.\n");
             }
-			goto sqlite3_error;
 		}
 		else
 		{
             printf("%s\n",cjson_str);
-			if((ret = ble_reply(ci)) < 0)
+			if((ret = ble_reply(ble)) < 0)
 			{
 				printf("Reply master failed.\n");
-				goto sqlite3_error;
 			}
 		}
+        
+        if(data_ok)
+        {
+            
+	        printf("-------------gather temperature------------\n");
+            
+		    cjson = cJSON_Parse(cjson_str);	
+		    if(cjson)
+		    {
+			    printf("SN : %s\n", cJSON_GetObjectItem(cjson, "SN")->valuestring);
+			    printf("temperature : %s\n", cJSON_GetObjectItem(cjson, "temperature")->valuestring);
+			    printf("humidity : %s%\n", cJSON_GetObjectItem(cjson, "humidity")->valuestring);
+			    printf("real time : %s\n", get_sys_time(time_buf ,sizeof(time_buf)));
+		    }   
+		    else
+		    {
+			    printf("Get json object failed.\n");
+		    }
 
-		cjson = cJSON_Parse(cjson_str);	
-		if(cjson)
-		{
-			printf("SN : %s\n", cJSON_GetObjectItem(cjson, "SN")->valuestring);
-			printf("temperature : %s\n", cJSON_GetObjectItem(cjson, "temperature")->valuestring);
-			printf("humidity : %s%\n", cJSON_GetObjectItem(cjson, "humidity")->valuestring);
-			printf("real time : %s\n", get_sys_time(time_buf ,sizeof(time_buf)));
-		}
-		else
-		{
-			printf("Get json object failed.\n");
-			goto json_error;
-		}
-
-		snprintf(sql,sizeof(sql),"INSERT INTO STUDENT (NUMBER,SN,TEMPER,HUMIDITY,TIME) VALUES (NULL,'%s','%s','%s','%s');",
-						cJSON_GetObjectItem(cjson, "SN")->valuestring,
-						cJSON_GetObjectItem(cjson, "temperature")->valuestring,
-						cJSON_GetObjectItem(cjson, "humidity")->valuestring,
-						time_buf);
-		rc = sqlite3_exec(db, sql, 0, 0, &zErrMsg);
-		if(rc != SQLITE_OK)
-		{
-			fprintf(stderr, "SQL error: %s\n", zErrMsg);
-			sqlite3_free(zErrMsg);
-			goto json_error;
-		}
+		    snprintf(sql,sizeof(sql),"INSERT INTO STUDENT (NUMBER,SN,TEMPER,HUMIDITY,TIME) VALUES (NULL,'%s','%s','%s','%s');",
+						    cJSON_GetObjectItem(cjson, "SN")->valuestring,
+						    cJSON_GetObjectItem(cjson, "temperature")->valuestring,
+						    cJSON_GetObjectItem(cjson, "humidity")->valuestring,
+						    time_buf);
+		    rc = sqlite3_exec(db, sql, 0, 0, &zErrMsg);
+		    if(rc != SQLITE_OK)
+		    {
+			    fprintf(stderr, "SQL error: %s\n", zErrMsg);
+			    sqlite3_free(zErrMsg);
+		    }
 		
-        printf("Insert SQL successfull.\n");
-		cJSON_Delete(cjson);	
+            printf("Insert SQL successfull.\n");
+		    cJSON_Delete(cjson);	
 
-		printf("---------------------------------------\n");
-	}
+		    printf("---------------------------------------\n");
+        }
+    }
 
 	sqlite3_close(db);
-    comport_close(ci);
+    comport_close(ble);
 	return 0;
 
-json_error:
-	cJSON_Delete(cjson);
 
 sqlite3_error:
 	sqlite3_close(db);
 
 error:
-    comport_close(ci);
+    comport_close(ble);
 	return -1;
 
 }

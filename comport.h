@@ -9,8 +9,6 @@ typedef struct comport_info{
     char    stopbit;
     char    parity;
     char    flowctl;
-    int     conn_bit;
-    int     data_ok;
 }comport_info_t;
 
 
