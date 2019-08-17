@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <termios.h>
 #include <string.h>
+#include <signal.h>
 #include <getopt.h>
 #include <stdlib.h>
 #include "ble.h"
@@ -20,7 +21,7 @@ void sig_handler(int sig_t);
 void sig_handler(int sig_t)
 {
     if(SIGKILL==sig_t)
-        p_stop=1;
+        g_stop=1;
 }
 
 
@@ -41,7 +42,7 @@ int main(int argc, char *argv[])
 	char 		sql[256];
 
     ble_ctx_t   ble;
-    comport_info_t *ci;
+    comport_info_t *comport;
 
     struct option opts[]=
     {
@@ -71,8 +72,8 @@ int main(int argc, char *argv[])
 
     signal(SIGKILL, sig_handler);
 
-    ci = comport_init(DEVNAME , baudrate, setting);
-    ble.comport = ci;
+    comport = comport_init(DEVNAME , baudrate, setting);
+    ble.comport = comport;
 
     if((rv = ble_init(&ble)) < 0)
     {
@@ -81,7 +82,10 @@ int main(int argc, char *argv[])
     }
     printf("ble device initialize successful.\n");
 
-    if((rv = database_init()) < 0)
+    printf("BLE Dongle Name: %s \n", ble.blename);
+    printf("BLE Dongle Addr: %s \n", ble.bleaddr);
+
+    if((rv = database_init(db, zErrMsg)) < 0)
     {
         printf("database initialize failed.\n");
         goto sqlite3_error;
@@ -91,14 +95,14 @@ int main(int argc, char *argv[])
     printf("BLE is waiting for connecting........\n");
 	while( !g_stop )
 	{
-        if( !ble.connected ) /* while ble lost connect and try connect each 1s */
+        if('0' == ble.connected) /* while ble lost connect and try connect each 1s */
         {
-            if(ble_sleep(ble))
+            if(ble_sleep(&ble))
             {
                 printf("Ble is sleep mode and wait for connecting......\n");
             }
 
-            while((rv = ble_check_conn(ble))< 0)
+            while((rv = ble_check_conn(&ble))< 0)
             {
                 sleep(1);
                 continue;
@@ -109,12 +113,11 @@ int main(int argc, char *argv[])
             
         }
 
-		if((ret = ble_recv_data(ble, cjson_str, sizeof(cjson_str))) < 0)
+		if((ret = ble_recv_data(&ble, cjson_str, sizeof(cjson_str))) < 0)
 		{
 			printf("Read json string failed.\n");
 
-            ble_check_lost(ble);
-            if((ret = ble_reply(ble)) < 0)
+            if((ret = ble_reply(&ble)) < 0)
             {
                 printf("Reply master failed.\n");
             }
@@ -122,13 +125,13 @@ int main(int argc, char *argv[])
 		else
 		{
             printf("%s\n",cjson_str);
-			if((ret = ble_reply(ble)) < 0)
+			if((ret = ble_reply(&ble)) < 0)
 			{
 				printf("Reply master failed.\n");
 			}
 		}
         
-        if(data_ok)
+        if(ble.data_ok == '1')
         {
             
 	        printf("-------------gather temperature------------\n");
@@ -166,7 +169,7 @@ int main(int argc, char *argv[])
     }
 
 	sqlite3_close(db);
-    comport_close(ble);
+    comport_close(comport);
 	return 0;
 
 
@@ -174,7 +177,7 @@ sqlite3_error:
 	sqlite3_close(db);
 
 error:
-    comport_close(ble);
+    comport_close(comport);
 	return -1;
 
 }
